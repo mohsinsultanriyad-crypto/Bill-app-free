@@ -19,11 +19,7 @@ import {
   Receipt,
   Fuel,
   Utensils,
-  Wrench,
-  Settings,
-  X,
-  Edit2,
-  Tag
+  Wrench
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -60,11 +56,7 @@ const BILL_SCHEMA = {
 
 export default function App() {
   const [bills, setBills] = useState<BillEntry[]>([]);
-  const [categories, setCategories] = useState<string[]>(['Fuel', 'Food', 'Tool', 'Other']);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [newCategoryName, setNewCategoryName] = useState('');
-  const [editingCategory, setEditingCategory] = useState<{ index: number, name: string } | null>(null);
   const [queue, setQueue] = useState<File[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
@@ -74,7 +66,6 @@ export default function App() {
   // Load from local storage on mount
   useEffect(() => {
     const savedBills = localStorage.getItem('scanned_bills');
-    const savedCategories = localStorage.getItem('bill_categories');
     
     if (savedBills) {
       try {
@@ -83,24 +74,12 @@ export default function App() {
         console.error("Failed to load bills", e);
       }
     }
-    
-    if (savedCategories) {
-      try {
-        setCategories(JSON.parse(savedCategories));
-      } catch (e) {
-        console.error("Failed to load categories", e);
-      }
-    }
   }, []);
 
   // Save to local storage on change
   useEffect(() => {
     localStorage.setItem('scanned_bills', JSON.stringify(bills));
   }, [bills]);
-
-  useEffect(() => {
-    localStorage.setItem('bill_categories', JSON.stringify(categories));
-  }, [categories]);
 
   // Queue Processor
   useEffect(() => {
@@ -160,7 +139,7 @@ export default function App() {
       const newBill: BillEntry = {
         id: crypto.randomUUID(),
         srNo: result.srNo || '',
-        type: 'Other', // Default to Other as requested
+        type: result.type || 'Other',
         invoiceNo: result.invoiceNo || 'N/A',
         date: result.date || new Date().toISOString().split('T')[0],
         amount: result.amount || 0,
@@ -217,45 +196,6 @@ export default function App() {
     setBills(prev => prev.filter(b => b.id !== id));
   };
 
-  const updateBillCategory = (id: string, newType: string) => {
-    setBills(prev => prev.map(b => b.id === id ? { ...b, type: newType } : b));
-  };
-
-  const addCategory = () => {
-    if (newCategoryName && !categories.includes(newCategoryName)) {
-      setCategories(prev => [...prev, newCategoryName]);
-      setNewCategoryName('');
-    }
-  };
-
-  const deleteCategory = (category: string) => {
-    if (category === 'Other') return; // Keep Other
-    setCategories(prev => prev.filter(c => c !== category));
-    // Reset bills with this category to Other
-    setBills(prev => prev.map(b => b.type === category ? { ...b, type: 'Other' } : b));
-  };
-
-  const startEditingCategory = (index: number, name: string) => {
-    setEditingCategory({ index, name });
-  };
-
-  const saveEditedCategory = () => {
-    if (editingCategory && editingCategory.name) {
-      const oldName = categories[editingCategory.index];
-      const newName = editingCategory.name;
-      
-      setCategories(prev => {
-        const next = [...prev];
-        next[editingCategory.index] = newName;
-        return next;
-      });
-      
-      // Update all bills with this category
-      setBills(prev => prev.map(b => b.type === oldName ? { ...b, type: newName } : b));
-      setEditingCategory(null);
-    }
-  };
-
   const clearAll = () => {
     if (window.confirm("Are you sure you want to clear all entries?")) {
       setBills([]);
@@ -287,12 +227,6 @@ export default function App() {
           </div>
           
           <div className="flex items-center gap-3">
-            <button 
-              onClick={() => setIsSettingsOpen(true)}
-              className="p-2 hover:bg-gray-100 rounded-full transition-colors"
-            >
-              <Settings className="w-5 h-5 text-gray-600" />
-            </button>
             {bills.length > 0 && (
               <button 
                 onClick={exportToExcel}
@@ -440,15 +374,9 @@ export default function App() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="font-bold truncate">{bill.invoiceNo}</span>
-                        <select 
-                          value={bill.type}
-                          onChange={(e) => updateBillCategory(bill.id, e.target.value)}
-                          className="text-[10px] bg-gray-100 px-1.5 py-0.5 rounded font-bold text-gray-500 uppercase border-none focus:ring-0 cursor-pointer hover:bg-gray-200 transition-colors"
-                        >
-                          {categories.map(cat => (
-                            <option key={cat} value={cat}>{cat}</option>
-                          ))}
-                        </select>
+                        <span className="text-[10px] bg-gray-100 px-1.5 py-0.5 rounded font-bold text-gray-500 uppercase tracking-wider">
+                          {bill.type}
+                        </span>
                       </div>
                       <div className="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
                         <span>{bill.date}</span>
@@ -488,114 +416,6 @@ export default function App() {
           </div>
         </div>
       )}
-
-      {/* Settings Modal */}
-      <AnimatePresence>
-        {isSettingsOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setIsSettingsOpen(false)}
-              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-            />
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="relative w-full max-w-md bg-white rounded-3xl shadow-2xl overflow-hidden"
-            >
-              <div className="p-6 border-b border-gray-100 flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="bg-gray-100 p-2 rounded-xl">
-                    <Settings className="w-5 h-5" />
-                  </div>
-                  <h2 className="text-xl font-bold">Settings</h2>
-                </div>
-                <button 
-                  onClick={() => setIsSettingsOpen(false)}
-                  className="p-2 hover:bg-gray-100 rounded-full transition-colors"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              <div className="p-6 space-y-6">
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <h3 className="font-bold flex items-center gap-2">
-                      <Tag className="w-4 h-4" />
-                      Categories
-                    </h3>
-                  </div>
-
-                  <div className="space-y-2 max-h-60 overflow-y-auto pr-2">
-                    {categories.map((cat, idx) => (
-                      <div key={cat} className="flex items-center justify-between p-3 bg-gray-50 rounded-xl group">
-                        {editingCategory?.index === idx ? (
-                          <input 
-                            autoFocus
-                            value={editingCategory.name}
-                            onChange={(e) => setEditingCategory({ ...editingCategory, name: e.target.value })}
-                            onBlur={saveEditedCategory}
-                            onKeyDown={(e) => e.key === 'Enter' && saveEditedCategory()}
-                            className="flex-1 bg-white border-none focus:ring-2 focus:ring-black rounded-lg px-2 py-1 text-sm font-medium"
-                          />
-                        ) : (
-                          <span className="text-sm font-medium">{cat}</span>
-                        )}
-                        
-                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <button 
-                            onClick={() => startEditingCategory(idx, cat)}
-                            className="p-1.5 hover:bg-gray-200 rounded-lg text-gray-500"
-                          >
-                            <Edit2 className="w-3.5 h-3.5" />
-                          </button>
-                          {cat !== 'Other' && (
-                            <button 
-                              onClick={() => deleteCategory(cat)}
-                              className="p-1.5 hover:bg-red-100 rounded-lg text-red-500"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="flex gap-2">
-                    <input 
-                      placeholder="New category name..."
-                      value={newCategoryName}
-                      onChange={(e) => setNewCategoryName(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && addCategory()}
-                      className="flex-1 bg-gray-50 border-none focus:ring-2 focus:ring-black rounded-xl px-4 py-3 text-sm"
-                    />
-                    <button 
-                      onClick={addCategory}
-                      className="bg-black text-white p-3 rounded-xl hover:bg-gray-800 transition-colors"
-                    >
-                      <Plus className="w-5 h-5" />
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="p-6 bg-gray-50 border-t border-gray-100">
-                <button 
-                  onClick={() => setIsSettingsOpen(false)}
-                  className="w-full bg-black text-white py-3 rounded-xl font-bold hover:bg-gray-800 transition-colors"
-                >
-                  Done
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
     </div>
   );
 }
