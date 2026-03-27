@@ -1,0 +1,5 @@
+{
+  "name": "Smart Bill Scanner",
+  "description": "Scan bills and invoices using AI to automatically extract details and export to Excel.",
+  "requestFramePermissions": ["camera"]
+}
