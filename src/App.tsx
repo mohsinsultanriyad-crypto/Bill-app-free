@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useRef, useEffect } from 'react';
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 import * as XLSX from 'xlsx';
 import { 
   Camera, 
@@ -56,12 +56,14 @@ const BILL_SCHEMA = {
 
 export default function App() {
   const [bills, setBills] = useState<BillEntry[]>([]);
-  const [isProcessing, setIsProcessing] = useState(false);
+  const [activeScans, setActiveScans] = useState(0);
   const [queue, setQueue] = useState<File[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
+
+  const MAX_CONCURRENT = 3; // Process 3 bills at a time for speed
 
   // Load from local storage on mount
   useEffect(() => {
@@ -83,10 +85,12 @@ export default function App() {
 
   // Queue Processor
   useEffect(() => {
-    if (queue.length > 0 && !isProcessing) {
-      processFile(queue[0]);
+    if (queue.length > 0 && activeScans < MAX_CONCURRENT) {
+      const nextFile = queue[0];
+      setQueue(prev => prev.slice(1));
+      processFile(nextFile);
     }
-  }, [queue, isProcessing]);
+  }, [queue, activeScans]);
 
   // Initialize Gemini
   const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY || '' });
@@ -100,29 +104,27 @@ export default function App() {
   };
 
   const processFile = async (file: File) => {
-    setIsProcessing(true);
+    setActiveScans(prev => prev + 1);
     setError(null);
 
-    // Show preview
-    const reader = new FileReader();
-    reader.onload = (event) => setPreviewImage(event.target?.result as string);
-    reader.readAsDataURL(file);
-
     try {
-      const base64Data = await fileToBase64(file);
+      // Compress image for faster upload
+      const compressedBase64 = await compressImage(file);
+      
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: [
           {
             parts: [
-              { text: "Extract bill information from this image. Support multiple languages including Arabic, Hindi, and English. Be precise with the amount and date. If the image is blurry, not a bill, or unreadable, set isReadable to false and provide a reason in errorReason. If Sr No is not found, leave it empty. Return the data in JSON format." },
-              { inlineData: { data: base64Data.split(',')[1], mimeType: file.type } }
+              { text: "FAST SCAN: Extract bill JSON {srNo, type, invoiceNo, date, amount, isReadable, errorReason}. Languages: Arabic, Hindi, English. Return JSON only." },
+              { inlineData: { data: compressedBase64.split(',')[1], mimeType: "image/jpeg" } }
             ]
           }
         ],
         config: {
           responseMimeType: "application/json",
           responseSchema: BILL_SCHEMA,
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
         }
       });
 
@@ -130,40 +132,64 @@ export default function App() {
       
       if (result.isReadable === false) {
         setError(`Skipped: ${result.errorReason || "Unreadable image"}`);
-        setQueue(prev => prev.slice(1));
-        setPreviewImage(null);
-        setIsProcessing(false);
-        return;
+      } else {
+        const newBill: BillEntry = {
+          id: crypto.randomUUID(),
+          srNo: result.srNo || '',
+          type: result.type || 'Other',
+          invoiceNo: result.invoiceNo || 'N/A',
+          date: result.date || new Date().toISOString().split('T')[0],
+          amount: result.amount || 0,
+        };
+        setBills(prev => [newBill, ...prev]);
       }
-
-      const newBill: BillEntry = {
-        id: crypto.randomUUID(),
-        srNo: result.srNo || '',
-        type: result.type || 'Other',
-        invoiceNo: result.invoiceNo || 'N/A',
-        date: result.date || new Date().toISOString().split('T')[0],
-        amount: result.amount || 0,
-      };
-
-      setBills(prev => [newBill, ...prev]);
-      setQueue(prev => prev.slice(1));
-      setPreviewImage(null);
     } catch (err: any) {
       console.error("Extraction error:", err);
       if (err?.message?.includes('429') || err?.status === 429) {
-        setError(`Rate limit hit. Waiting 30s to retry... (${queue.length} left)`);
-        setTimeout(() => {
-          setIsProcessing(false);
-        }, 30000);
-        return;
+        setError(`Rate limit hit. Re-queuing...`);
+        setQueue(prev => [...prev, file]); // Put back in queue
       } else {
-        setError("Error processing file. Skipping to next.");
-        setQueue(prev => prev.slice(1));
-        setPreviewImage(null);
+        setError("Error processing file. Skipping.");
       }
     } finally {
-      setIsProcessing(false);
+      setActiveScans(prev => prev - 1);
     }
+  };
+
+  const compressImage = (file: File): Promise<string> => {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = (e) => {
+        const img = new Image();
+        img.src = e.target?.result as string;
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          let width = img.width;
+          let height = img.height;
+          
+          // Max 1200px for fast processing but clear OCR
+          const MAX_SIZE = 1200;
+          if (width > height) {
+            if (width > MAX_SIZE) {
+              height *= MAX_SIZE / width;
+              width = MAX_SIZE;
+            }
+          } else {
+            if (height > MAX_SIZE) {
+              width *= MAX_SIZE / height;
+              height = MAX_SIZE;
+            }
+          }
+          
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx?.drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL('image/jpeg', 0.7)); // 70% quality is enough for OCR
+        };
+      };
+    });
   };
 
   const fileToBase64 = (file: File): Promise<string> => {
@@ -244,7 +270,7 @@ export default function App() {
         {/* Action Card */}
         <section className="bg-white rounded-3xl p-8 border border-gray-100 shadow-sm text-center space-y-4">
           <div className="mx-auto w-20 h-20 bg-gray-50 rounded-full flex items-center justify-center border-2 border-dashed border-gray-200">
-            {isProcessing ? (
+            {activeScans > 0 ? (
               <Loader2 className="w-10 h-10 text-black animate-spin" />
             ) : (
               <ImageIcon className="w-10 h-10 text-gray-400" />
@@ -261,7 +287,7 @@ export default function App() {
           <div className="flex flex-col sm:flex-row gap-3 pt-4">
             <button 
               onClick={() => fileInputRef.current?.click()}
-              disabled={isProcessing || queue.length > 0}
+              disabled={activeScans > 0 || queue.length > 0}
               className="flex-1 bg-black hover:bg-gray-800 text-white py-4 rounded-2xl font-bold text-lg flex items-center justify-center gap-3 transition-all active:scale-[0.98] disabled:opacity-50"
             >
               <Camera className="w-6 h-6" />
@@ -270,7 +296,7 @@ export default function App() {
             
             <button 
               onClick={() => galleryInputRef.current?.click()}
-              disabled={isProcessing || queue.length > 0}
+              disabled={activeScans > 0 || queue.length > 0}
               className="flex-1 bg-white border-2 border-black hover:bg-gray-50 text-black py-4 rounded-2xl font-bold text-lg flex items-center justify-center gap-3 transition-all active:scale-[0.98] disabled:opacity-50"
             >
               <ImageIcon className="w-6 h-6" />
@@ -298,7 +324,7 @@ export default function App() {
 
           {queue.length > 0 && (
             <div className="bg-blue-50 text-blue-700 p-3 rounded-xl text-sm font-bold flex items-center justify-between">
-              <span>Queue: {queue.length} bills remaining...</span>
+              <span>Queue: {queue.length} left • Active: {activeScans}</span>
               <Loader2 className="w-4 h-4 animate-spin" />
             </div>
           )}
@@ -313,21 +339,23 @@ export default function App() {
 
         {/* Processing Preview */}
         <AnimatePresence>
-          {previewImage && (
+          {activeScans > 0 && (
             <motion.div 
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95 }}
               className="bg-white rounded-3xl p-4 border border-gray-100 shadow-sm flex items-center gap-4"
             >
-              <img src={previewImage} alt="Preview" className="w-20 h-20 object-cover rounded-xl border border-gray-200" />
+              <div className="bg-black p-4 rounded-xl">
+                <Loader2 className="w-6 h-6 text-white animate-spin" />
+              </div>
               <div className="flex-1">
-                <p className="font-bold">Analyzing image...</p>
+                <p className="font-bold">Turbo Scanning {activeScans} bills...</p>
                 <div className="w-full bg-gray-100 h-1.5 rounded-full mt-2 overflow-hidden">
                   <motion.div 
                     initial={{ x: '-100%' }}
                     animate={{ x: '100%' }}
-                    transition={{ repeat: Infinity, duration: 1.5, ease: "linear" }}
+                    transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
                     className="w-1/2 h-full bg-black rounded-full"
                   />
                 </div>
@@ -350,7 +378,7 @@ export default function App() {
             )}
           </div>
 
-          {bills.length === 0 && !isProcessing ? (
+          {bills.length === 0 && activeScans === 0 ? (
             <div className="bg-gray-50 border-2 border-dashed border-gray-200 rounded-3xl py-12 text-center">
               <Receipt className="w-12 h-12 text-gray-300 mx-auto mb-3" />
               <p className="text-gray-400 font-medium">No bills scanned yet</p>
