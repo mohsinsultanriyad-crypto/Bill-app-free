@@ -19,7 +19,10 @@ import {
   Receipt,
   Fuel,
   Utensils,
-  Wrench
+  Wrench,
+  UserCircle,
+  CreditCard,
+  Globe
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -40,6 +43,14 @@ interface BillEntry {
   rawResponse?: string;
 }
 
+interface IqamaEntry {
+  id: string;
+  name: string;
+  iqamaNo: string;
+  nationality: string;
+  expiryDate?: string;
+}
+
 const BILL_SCHEMA = {
   type: Type.OBJECT,
   properties: {
@@ -54,10 +65,24 @@ const BILL_SCHEMA = {
   required: ["isReadable"],
 };
 
+const IQAMA_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    name: { type: Type.STRING, description: "Full name of the person" },
+    iqamaNo: { type: Type.STRING, description: "Iqama number (convert Arabic numerals to standard digits)" },
+    nationality: { type: Type.STRING, description: "Nationality of the person" },
+    isReadable: { type: Type.BOOLEAN, description: "True if the Iqama is clear and readable, false otherwise" },
+    errorReason: { type: Type.STRING, description: "If not readable, provide a brief reason" },
+  },
+  required: ["isReadable"],
+};
+
 export default function App() {
+  const [activeTab, setActiveTab] = useState<'bills' | 'iqama'>('bills');
   const [bills, setBills] = useState<BillEntry[]>([]);
+  const [iqamas, setIqamas] = useState<IqamaEntry[]>([]);
   const [activeScans, setActiveScans] = useState(0);
-  const [queue, setQueue] = useState<File[]>([]);
+  const [queue, setQueue] = useState<{ file: File; type: 'bills' | 'iqama' }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -68,12 +93,21 @@ export default function App() {
   // Load from local storage on mount
   useEffect(() => {
     const savedBills = localStorage.getItem('scanned_bills');
+    const savedIqamas = localStorage.getItem('scanned_iqamas');
     
     if (savedBills) {
       try {
         setBills(JSON.parse(savedBills));
       } catch (e) {
         console.error("Failed to load bills", e);
+      }
+    }
+
+    if (savedIqamas) {
+      try {
+        setIqamas(JSON.parse(savedIqamas));
+      } catch (e) {
+        console.error("Failed to load iqamas", e);
       }
     }
   }, []);
@@ -83,47 +117,55 @@ export default function App() {
     localStorage.setItem('scanned_bills', JSON.stringify(bills));
   }, [bills]);
 
+  useEffect(() => {
+    localStorage.setItem('scanned_iqamas', JSON.stringify(iqamas));
+  }, [iqamas]);
+
   // Queue Processor
   useEffect(() => {
     if (queue.length > 0 && activeScans < MAX_CONCURRENT) {
-      const nextFile = queue[0];
+      const nextItem = queue[0];
       setQueue(prev => prev.slice(1));
-      processFile(nextFile);
+      processFile(nextItem.file, nextItem.type);
     }
   }, [queue, activeScans]);
-
-  // Initialize Gemini
-  const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY || '' });
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
-    setQueue(prev => [...prev, ...files]);
+    setQueue(prev => [...prev, ...files.map(file => ({ file, type: activeTab }))]);
     if (fileInputRef.current) fileInputRef.current.value = '';
     if (galleryInputRef.current) galleryInputRef.current.value = '';
   };
 
-  const processFile = async (file: File) => {
+  const processFile = async (file: File, scanType: 'bills' | 'iqama') => {
     setActiveScans(prev => prev + 1);
     setError(null);
 
     try {
+      // Initialize Gemini right before use
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+
       // Compress image for faster upload
       const compressedBase64 = await compressImage(file);
       
+      const prompt = scanType === 'bills' 
+        ? "FAST SCAN: Extract bill JSON {srNo, type, invoiceNo, date, amount, isReadable, errorReason}. Languages: Arabic, Hindi, English. Return JSON only."
+        : "IQAMA SCAN: Extract Iqama JSON {name, iqamaNo, nationality, isReadable, errorReason}. IMPORTANT: Convert Arabic numerals (١٢٣) to standard digits (123) for iqamaNo. Return JSON only.";
+
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
         contents: [
           {
             parts: [
-              { text: "FAST SCAN: Extract bill JSON {srNo, type, invoiceNo, date, amount, isReadable, errorReason}. Languages: Arabic, Hindi, English. Return JSON only." },
+              { text: prompt },
               { inlineData: { data: compressedBase64.split(',')[1], mimeType: "image/jpeg" } }
             ]
           }
         ],
         config: {
           responseMimeType: "application/json",
-          responseSchema: BILL_SCHEMA,
+          responseSchema: scanType === 'bills' ? BILL_SCHEMA : IQAMA_SCHEMA,
           thinkingConfig: { thinkingLevel: ThinkingLevel.LOW }
         }
       });
@@ -133,21 +175,31 @@ export default function App() {
       if (result.isReadable === false) {
         setError(`Skipped: ${result.errorReason || "Unreadable image"}`);
       } else {
-        const newBill: BillEntry = {
-          id: crypto.randomUUID(),
-          srNo: result.srNo || '',
-          type: result.type || 'Other',
-          invoiceNo: result.invoiceNo || 'N/A',
-          date: result.date || new Date().toISOString().split('T')[0],
-          amount: result.amount || 0,
-        };
-        setBills(prev => [newBill, ...prev]);
+        if (scanType === 'bills') {
+          const newBill: BillEntry = {
+            id: crypto.randomUUID(),
+            srNo: result.srNo || '',
+            type: result.type || 'Other',
+            invoiceNo: result.invoiceNo || 'N/A',
+            date: result.date || new Date().toISOString().split('T')[0],
+            amount: result.amount || 0,
+          };
+          setBills(prev => [newBill, ...prev]);
+        } else {
+          const newIqama: IqamaEntry = {
+            id: crypto.randomUUID(),
+            name: result.name || 'N/A',
+            iqamaNo: result.iqamaNo || 'N/A',
+            nationality: result.nationality || 'N/A',
+          };
+          setIqamas(prev => [newIqama, ...prev]);
+        }
       }
     } catch (err: any) {
       console.error("Extraction error:", err);
       if (err?.message?.includes('429') || err?.status === 429) {
         setError(`Rate limit hit. Re-queuing...`);
-        setQueue(prev => [...prev, file]); // Put back in queue
+        setQueue(prev => [...prev, { file, type: scanType }]); // Put back in queue
       } else {
         setError("Error processing file. Skipping.");
       }
@@ -202,29 +254,44 @@ export default function App() {
   };
 
   const exportToExcel = () => {
-    if (bills.length === 0) return;
-
-    const worksheet = XLSX.utils.json_to_sheet(bills.map(({ id, ...rest }) => ({
-      'Sr No': rest.srNo,
-      'Type': rest.type,
-      'Invoice No': rest.invoiceNo,
-      'Date': rest.date,
-      'Amount': rest.amount
-    })));
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Bills");
-    
     const date = new Date().toISOString().split('T')[0];
-    XLSX.writeFile(workbook, `Bills_Export_${date}.xlsx`);
+
+    if (activeTab === 'bills') {
+      if (bills.length === 0) return;
+      const worksheet = XLSX.utils.json_to_sheet(bills.map(({ id, ...rest }) => ({
+        'Sr No': rest.srNo,
+        'Type': rest.type,
+        'Invoice No': rest.invoiceNo,
+        'Date': rest.date,
+        'Amount': rest.amount
+      })));
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Bills");
+      XLSX.writeFile(workbook, `Bills_Export_${date}.xlsx`);
+    } else {
+      if (iqamas.length === 0) return;
+      const worksheet = XLSX.utils.json_to_sheet(iqamas.map(({ id, ...rest }) => ({
+        'Name': rest.name,
+        'Iqama No': rest.iqamaNo,
+        'Nationality': rest.nationality
+      })));
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Iqamas");
+      XLSX.writeFile(workbook, `Iqamas_Export_${date}.xlsx`);
+    }
   };
 
   const deleteBill = (id: string) => {
     setBills(prev => prev.filter(b => b.id !== id));
   };
 
+  const deleteIqama = (id: string) => {
+    setIqamas(prev => prev.filter(i => i.id !== id));
+  };
+
   const clearAll = () => {
-    if (window.confirm("Are you sure you want to clear all entries?")) {
-      setBills([]);
+    if (window.confirm(`Are you sure you want to clear all ${activeTab === 'bills' ? 'bills' : 'iqamas'}?`)) {
+      if (activeTab === 'bills') setBills([]);
+      else setIqamas([]);
     }
   };
 
@@ -253,7 +320,7 @@ export default function App() {
           </div>
           
           <div className="flex items-center gap-3">
-            {bills.length > 0 && (
+            {(activeTab === 'bills' ? bills.length > 0 : iqamas.length > 0) && (
               <button 
                 onClick={exportToExcel}
                 className="flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-all shadow-sm active:scale-95"
@@ -267,6 +334,30 @@ export default function App() {
       </header>
 
       <main className="max-w-4xl mx-auto p-4 space-y-6">
+        {/* Tabs */}
+        <div className="flex bg-gray-100 p-1 rounded-2xl">
+          <button 
+            onClick={() => setActiveTab('bills')}
+            className={cn(
+              "flex-1 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all",
+              activeTab === 'bills' ? "bg-white text-black shadow-sm" : "text-gray-500 hover:text-gray-700"
+            )}
+          >
+            <Receipt className="w-4 h-4" />
+            Bills
+          </button>
+          <button 
+            onClick={() => setActiveTab('iqama')}
+            className={cn(
+              "flex-1 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all",
+              activeTab === 'iqama' ? "bg-white text-black shadow-sm" : "text-gray-500 hover:text-gray-700"
+            )}
+          >
+            <CreditCard className="w-4 h-4" />
+            Iqama
+          </button>
+        </div>
+
         {/* Action Card */}
         <section className="bg-white rounded-3xl p-8 border border-gray-100 shadow-sm text-center space-y-4">
           <div className="mx-auto w-20 h-20 bg-gray-50 rounded-full flex items-center justify-center border-2 border-dashed border-gray-200">
@@ -278,9 +369,12 @@ export default function App() {
           </div>
           
           <div className="space-y-2">
-            <h2 className="text-2xl font-bold">Scan your bill</h2>
+            <h2 className="text-2xl font-bold">Scan {activeTab === 'bills' ? 'your bill' : 'Iqama'}</h2>
             <p className="text-gray-500 max-w-xs mx-auto">
-              Take a photo of your fuel, food, or tool bill to automatically extract details.
+              {activeTab === 'bills' 
+                ? "Take a photo of your fuel, food, or tool bill to automatically extract details."
+                : "Take a photo of an Iqama to extract Name, Number, and Nationality."
+              }
             </p>
           </div>
 
@@ -350,7 +444,7 @@ export default function App() {
                 <Loader2 className="w-6 h-6 text-white animate-spin" />
               </div>
               <div className="flex-1">
-                <p className="font-bold">Turbo Scanning {activeScans} bills...</p>
+                <p className="font-bold">Turbo Scanning {activeScans} {activeTab === 'bills' ? 'bills' : 'iqamas'}...</p>
                 <div className="w-full bg-gray-100 h-1.5 rounded-full mt-2 overflow-hidden">
                   <motion.div 
                     initial={{ x: '-100%' }}
@@ -367,8 +461,10 @@ export default function App() {
         {/* List Section */}
         <div className="space-y-4">
           <div className="flex items-center justify-between px-2">
-            <h3 className="font-bold text-lg">Scanned Entries ({bills.length})</h3>
-            {bills.length > 0 && (
+            <h3 className="font-bold text-lg">
+              Scanned {activeTab === 'bills' ? 'Entries' : 'Iqamas'} ({activeTab === 'bills' ? bills.length : iqamas.length})
+            </h3>
+            {(activeTab === 'bills' ? bills.length > 0 : iqamas.length > 0) && (
               <button 
                 onClick={clearAll}
                 className="text-xs font-bold text-red-500 hover:text-red-600 uppercase tracking-wider"
@@ -378,59 +474,112 @@ export default function App() {
             )}
           </div>
 
-          {bills.length === 0 && activeScans === 0 ? (
-            <div className="bg-gray-50 border-2 border-dashed border-gray-200 rounded-3xl py-12 text-center">
-              <Receipt className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-              <p className="text-gray-400 font-medium">No bills scanned yet</p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <AnimatePresence mode="popLayout">
-                {bills.map((bill) => (
-                  <motion.div
-                    key={bill.id}
-                    layout
-                    initial={{ opacity: 0, x: -20 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    exit={{ opacity: 0, scale: 0.95 }}
-                    className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm flex items-center gap-4 hover:border-gray-300 transition-colors group"
-                  >
-                    <div className="bg-gray-50 p-3 rounded-xl">
-                      {getIcon(bill.type)}
-                    </div>
-                    
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold truncate">{bill.invoiceNo}</span>
-                        <span className="text-[10px] bg-gray-100 px-1.5 py-0.5 rounded font-bold text-gray-500 uppercase tracking-wider">
-                          {bill.type}
-                        </span>
+          {activeTab === 'bills' ? (
+            bills.length === 0 && activeScans === 0 ? (
+              <div className="bg-gray-50 border-2 border-dashed border-gray-200 rounded-3xl py-12 text-center">
+                <Receipt className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+                <p className="text-gray-400 font-medium">No bills scanned yet</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <AnimatePresence mode="popLayout">
+                  {bills.map((bill) => (
+                    <motion.div
+                      key={bill.id}
+                      layout
+                      initial={{ opacity: 0, x: -20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, scale: 0.95 }}
+                      className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm flex items-center gap-4 hover:border-gray-300 transition-colors group"
+                    >
+                      <div className="bg-gray-50 p-3 rounded-xl">
+                        {getIcon(bill.type)}
                       </div>
-                      <div className="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
-                        <span>{bill.date}</span>
-                        {bill.srNo && <span>• Sr: {bill.srNo}</span>}
+                      
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold truncate">{bill.invoiceNo}</span>
+                          <span className="text-[10px] bg-gray-100 px-1.5 py-0.5 rounded font-bold text-gray-500 uppercase tracking-wider">
+                            {bill.type}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
+                          <span>{bill.date}</span>
+                          {bill.srNo && <span>• Sr: {bill.srNo}</span>}
+                        </div>
                       </div>
-                    </div>
 
-                    <div className="text-right">
-                      <p className="font-black text-lg">₹{bill.amount.toLocaleString()}</p>
-                      <button 
-                        onClick={() => deleteBill(bill.id)}
-                        className="text-gray-300 hover:text-red-500 transition-colors p-1"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </motion.div>
-                ))}
-              </AnimatePresence>
-            </div>
+                      <div className="text-right">
+                        <p className="font-black text-lg">₹{bill.amount.toLocaleString()}</p>
+                        <button 
+                          onClick={() => deleteBill(bill.id)}
+                          className="text-gray-300 hover:text-red-500 transition-colors p-1"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </motion.div>
+                  ))}
+                </AnimatePresence>
+              </div>
+            )
+          ) : (
+            iqamas.length === 0 && activeScans === 0 ? (
+              <div className="bg-gray-50 border-2 border-dashed border-gray-200 rounded-3xl py-12 text-center">
+                <UserCircle className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+                <p className="text-gray-400 font-medium">No Iqamas scanned yet</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <AnimatePresence mode="popLayout">
+                  {iqamas.map((iqama) => (
+                    <motion.div
+                      key={iqama.id}
+                      layout
+                      initial={{ opacity: 0, x: -20 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, scale: 0.95 }}
+                      className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm flex items-center gap-4 hover:border-gray-300 transition-colors group"
+                    >
+                      <div className="bg-gray-50 p-3 rounded-xl">
+                        <UserCircle className="w-5 h-5 text-blue-500" />
+                      </div>
+                      
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-bold truncate">{iqama.name}</span>
+                        </div>
+                        <div className="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
+                          <span className="flex items-center gap-1">
+                            <CreditCard className="w-3 h-3" />
+                            {iqama.iqamaNo}
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <Globe className="w-3 h-3" />
+                            {iqama.nationality}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="text-right">
+                        <button 
+                          onClick={() => deleteIqama(iqama.id)}
+                          className="text-gray-300 hover:text-red-500 transition-colors p-1"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </motion.div>
+                  ))}
+                </AnimatePresence>
+              </div>
+            )
           )}
         </div>
       </main>
 
       {/* Floating Stats */}
-      {bills.length > 0 && (
+      {activeTab === 'bills' && bills.length > 0 && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-[calc(100%-2rem)] max-w-md">
           <div className="bg-black text-white p-4 rounded-2xl shadow-2xl flex items-center justify-between">
             <div>
