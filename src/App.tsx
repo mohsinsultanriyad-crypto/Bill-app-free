@@ -84,31 +84,11 @@ export default function App() {
   const [activeScans, setActiveScans] = useState(0);
   const [queue, setQueue] = useState<{ file: File; type: 'bills' | 'iqama' }[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [hasApiKey, setHasApiKey] = useState(false);
   const [isRetrying, setIsRetrying] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
 
-  const MAX_CONCURRENT = 5; // Reduced default to respect free tier, but stays fast for paid keys
-
-  // Check for API Key selection
-  useEffect(() => {
-    const checkKey = async () => {
-      if ((window as any).aistudio?.hasSelectedApiKey) {
-        const selected = await (window as any).aistudio.hasSelectedApiKey();
-        setHasApiKey(selected);
-      }
-    };
-    checkKey();
-  }, []);
-
-  const handleSelectKey = async () => {
-    if ((window as any).aistudio?.openSelectKey) {
-      await (window as any).aistudio.openSelectKey();
-      setHasApiKey(true);
-      setError(null);
-    }
-  };
+  const MAX_CONCURRENT = 2; // Low concurrency to respect free tier limits
 
   // Load from local storage on mount
   useEffect(() => {
@@ -163,11 +143,11 @@ export default function App() {
     setError(null);
 
     try {
-      // Create a fresh instance to use the most up-to-date API key from the dialog
-      const apiKey = process.env.API_KEY || (window as any).ENV?.GEMINI_API_KEY || import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
+      // Use the default free Gemini API key
+      const apiKey = (window as any).ENV?.GEMINI_API_KEY || import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
       
       if (!apiKey) {
-        setError("API Key is missing. Please click 'Upgrade to Pro' to use your own key or add 'GEMINI_API_KEY' to your Secrets.");
+        setError("AI configuration missing. Please add 'GEMINI_API_KEY' to your Secrets.");
         setActiveScans(prev => prev - 1);
         return;
       }
@@ -229,14 +209,11 @@ export default function App() {
       
       if (isRateLimit) {
         setIsRetrying(true);
-        setError(`Rate limit hit (Free Tier). Retrying in 10s...`);
-        // Wait 10 seconds before re-queuing to respect the cooldown
-        await new Promise(resolve => setTimeout(resolve, 10000));
+        setError(`Daily limit reached (Free AI). Retrying in 15s...`);
+        // Wait 15 seconds before re-queuing
+        await new Promise(resolve => setTimeout(resolve, 15000));
         setQueue(prev => [...prev, { file, type: scanType }]);
         setIsRetrying(false);
-      } else if (err?.message?.includes('Requested entity was not found')) {
-        setError("API Key session expired. Please re-select your key.");
-        setHasApiKey(false);
       } else {
         setError("Error processing file. Skipping.");
       }
@@ -354,24 +331,15 @@ export default function App() {
               <Camera className="w-6 h-6 text-white" />
             </div>
             <div>
-              <h1 className="text-xl font-black tracking-tight text-zinc-900">Smart Scanner Pro</h1>
+              <h1 className="text-xl font-black tracking-tight text-zinc-900">Smart Scanner</h1>
               <div className="flex items-center gap-2">
                 <span className="flex h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                <p className="text-[9px] text-zinc-400 font-bold uppercase tracking-[0.25em]">AI Extraction Engine v3.0</p>
+                <p className="text-[9px] text-zinc-400 font-bold uppercase tracking-[0.25em]">Free AI Extraction Engine</p>
               </div>
             </div>
           </div>
           
           <div className="flex items-center gap-3">
-            {!hasApiKey && (
-              <button 
-                onClick={handleSelectKey}
-                className="hidden md:flex items-center gap-2 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest transition-all border border-emerald-200/50"
-              >
-                <CheckCircle2 className="w-3 h-3" />
-                Upgrade to Pro
-              </button>
-            )}
             {(activeTab === 'bills' ? bills.length > 0 : iqamas.length > 0) && (
               <motion.button 
                 initial={{ opacity: 0, scale: 0.9 }}
@@ -566,21 +534,13 @@ export default function App() {
             animate={{ opacity: 1, x: 0 }}
             className={cn(
               "p-4 rounded-2xl flex items-center justify-between gap-3 text-sm font-bold border",
-              error.includes('Rate limit') ? "bg-amber-50 border-amber-100 text-amber-700" : "bg-red-50 border-red-100 text-red-600"
+              error.includes('limit') ? "bg-amber-50 border-amber-100 text-amber-700" : "bg-red-50 border-red-100 text-red-600"
             )}
           >
             <div className="flex items-center gap-3">
               <AlertCircle className="w-5 h-5 shrink-0" />
               {error}
             </div>
-            {error.includes('Rate limit') && !hasApiKey && (
-              <button 
-                onClick={handleSelectKey}
-                className="bg-zinc-950 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-zinc-800 transition-all"
-              >
-                Use Paid Key
-              </button>
-            )}
           </motion.div>
         )}
 

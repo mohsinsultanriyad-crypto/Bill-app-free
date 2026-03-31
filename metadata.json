@@ -1,5 +1,5 @@
 {
-  "name": "Smart Scanner Pro",
-  "description": "Professional AI-powered scanner for bills, invoices, and Iqamas with Excel export capabilities.",
+  "name": "Smart Scanner",
+  "description": "Free AI-powered scanner for bills, invoices, and Iqamas with Excel export capabilities.",
   "requestFramePermissions": ["camera"]
 }
