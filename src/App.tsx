@@ -84,11 +84,31 @@ export default function App() {
   const [activeScans, setActiveScans] = useState(0);
   const [queue, setQueue] = useState<{ file: File; type: 'bills' | 'iqama' }[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [hasApiKey, setHasApiKey] = useState(false);
+  const [isRetrying, setIsRetrying] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const galleryInputRef = useRef<HTMLInputElement>(null);
 
-  const MAX_CONCURRENT = 3; // Process 3 bills at a time for speed
+  const MAX_CONCURRENT = 5; // Reduced default to respect free tier, but stays fast for paid keys
+
+  // Check for API Key selection
+  useEffect(() => {
+    const checkKey = async () => {
+      if ((window as any).aistudio?.hasSelectedApiKey) {
+        const selected = await (window as any).aistudio.hasSelectedApiKey();
+        setHasApiKey(selected);
+      }
+    };
+    checkKey();
+  }, []);
+
+  const handleSelectKey = async () => {
+    if ((window as any).aistudio?.openSelectKey) {
+      await (window as any).aistudio.openSelectKey();
+      setHasApiKey(true);
+      setError(null);
+    }
+  };
 
   // Load from local storage on mount
   useEffect(() => {
@@ -143,11 +163,11 @@ export default function App() {
     setError(null);
 
     try {
-      // Initialize Gemini right before use
-      const apiKey = process.env.GEMINI_API_KEY || import.meta.env.VITE_GEMINI_API_KEY;
+      // Create a fresh instance to use the most up-to-date API key from the dialog
+      const apiKey = process.env.API_KEY || (window as any).ENV?.GEMINI_API_KEY || import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
       
       if (!apiKey) {
-        setError("API Key is missing. Please add 'GEMINI_API_KEY' to your Secrets in AI Studio and restart the app.");
+        setError("API Key is missing. Please click 'Upgrade to Pro' to use your own key or add 'GEMINI_API_KEY' to your Secrets.");
         setActiveScans(prev => prev - 1);
         return;
       }
@@ -205,9 +225,18 @@ export default function App() {
       }
     } catch (err: any) {
       console.error("Extraction error:", err);
-      if (err?.message?.includes('429') || err?.status === 429) {
-        setError(`Rate limit hit. Re-queuing...`);
-        setQueue(prev => [...prev, { file, type: scanType }]); // Put back in queue
+      const isRateLimit = err?.message?.includes('429') || err?.status === 429 || err?.message?.includes('RESOURCE_EXHAUSTED');
+      
+      if (isRateLimit) {
+        setIsRetrying(true);
+        setError(`Rate limit hit (Free Tier). Retrying in 10s...`);
+        // Wait 10 seconds before re-queuing to respect the cooldown
+        await new Promise(resolve => setTimeout(resolve, 10000));
+        setQueue(prev => [...prev, { file, type: scanType }]);
+        setIsRetrying(false);
+      } else if (err?.message?.includes('Requested entity was not found')) {
+        setError("API Key session expired. Please re-select your key.");
+        setHasApiKey(false);
       } else {
         setError("Error processing file. Skipping.");
       }
@@ -313,97 +342,162 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[#F8F9FA] text-[#1A1A1A] font-sans pb-20">
+    <div className="min-h-screen bg-[#F8F9FA] text-[#1A1A1E] font-sans selection:bg-zinc-950 selection:text-white">
+      {/* Background Gradient */}
+      <div className="fixed inset-0 bg-[radial-gradient(circle_at_top_right,_var(--tw-gradient-stops))] from-zinc-100 via-transparent to-transparent pointer-events-none" />
+      
       {/* Header */}
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-10 px-4 py-4">
-        <div className="max-w-4xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="bg-black p-2 rounded-xl">
+      <header className="bg-white/70 backdrop-blur-xl border-b border-zinc-200/50 sticky top-0 z-50 px-6 py-4">
+        <div className="max-w-5xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="bg-zinc-950 p-2.5 rounded-2xl shadow-2xl shadow-zinc-200/50">
               <Camera className="w-6 h-6 text-white" />
             </div>
             <div>
-              <h1 className="text-xl font-bold tracking-tight">Bill Scanner</h1>
-              <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">AI-Powered Extraction</p>
+              <h1 className="text-xl font-black tracking-tight text-zinc-900">Smart Scanner Pro</h1>
+              <div className="flex items-center gap-2">
+                <span className="flex h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                <p className="text-[9px] text-zinc-400 font-bold uppercase tracking-[0.25em]">AI Extraction Engine v3.0</p>
+              </div>
             </div>
           </div>
           
           <div className="flex items-center gap-3">
-            {(activeTab === 'bills' ? bills.length > 0 : iqamas.length > 0) && (
+            {!hasApiKey && (
               <button 
+                onClick={handleSelectKey}
+                className="hidden md:flex items-center gap-2 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest transition-all border border-emerald-200/50"
+              >
+                <CheckCircle2 className="w-3 h-3" />
+                Upgrade to Pro
+              </button>
+            )}
+            {(activeTab === 'bills' ? bills.length > 0 : iqamas.length > 0) && (
+              <motion.button 
+                initial={{ opacity: 0, scale: 0.9 }}
+                animate={{ opacity: 1, scale: 1 }}
                 onClick={exportToExcel}
-                className="flex items-center gap-2 bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-all shadow-sm active:scale-95"
+                className="flex items-center gap-2 bg-zinc-900 hover:bg-zinc-800 text-white px-5 py-2.5 rounded-xl text-sm font-bold transition-all shadow-md active:scale-95"
               >
                 <FileSpreadsheet className="w-4 h-4" />
-                Export Excel
-              </button>
+                Export Data
+              </motion.button>
             )}
           </div>
         </div>
       </header>
 
-      <main className="max-w-4xl mx-auto p-4 space-y-6">
-        {/* Tabs */}
-        <div className="flex bg-gray-100 p-1 rounded-2xl">
+      <main className="max-w-5xl mx-auto p-6 space-y-8">
+        {/* Dashboard Summary */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="bg-white p-8 rounded-[2.5rem] border border-zinc-200/60 shadow-sm space-y-1 group hover:shadow-xl hover:shadow-zinc-200/30 transition-all duration-500">
+            <p className="text-[10px] font-black text-zinc-400 uppercase tracking-widest">Total Scanned</p>
+            <div className="flex items-baseline gap-2">
+              <span className="text-5xl font-black tracking-tighter group-hover:scale-105 transition-transform origin-left duration-500">{activeTab === 'bills' ? bills.length : iqamas.length}</span>
+              <span className="text-zinc-400 font-bold text-sm">entries</span>
+            </div>
+          </div>
+          
+          {activeTab === 'bills' ? (
+            <div className="bg-zinc-950 p-8 rounded-[2.5rem] text-white shadow-2xl shadow-zinc-300/50 space-y-1 md:col-span-2 relative overflow-hidden group">
+              <div className="absolute top-0 right-0 -mr-12 -mt-12 w-48 h-48 bg-emerald-500/10 rounded-full blur-3xl group-hover:bg-emerald-500/20 transition-colors duration-700" />
+              <p className="text-[10px] font-black text-zinc-500 uppercase tracking-widest relative z-10">Aggregate Value</p>
+              <div className="flex items-baseline gap-2 relative z-10">
+                <span className="text-5xl font-black tracking-tighter text-emerald-400">
+                  SAR {bills.reduce((acc, b) => acc + b.amount, 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                </span>
+              </div>
+            </div>
+          ) : (
+            <div className="bg-zinc-950 p-8 rounded-[2.5rem] text-white shadow-2xl shadow-zinc-300/50 space-y-1 md:col-span-2 relative overflow-hidden group">
+              <div className="absolute top-0 right-0 -mr-12 -mt-12 w-48 h-48 bg-blue-500/10 rounded-full blur-3xl group-hover:bg-blue-500/20 transition-colors duration-700" />
+              <p className="text-[10px] font-black text-zinc-500 uppercase tracking-widest relative z-10">Nationalities Tracked</p>
+              <div className="flex items-baseline gap-2 relative z-10">
+                <span className="text-5xl font-black tracking-tighter text-blue-400">
+                  {new Set(iqamas.map(i => i.nationality)).size}
+                </span>
+                <span className="text-zinc-500 font-bold text-sm">unique origins</span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Tabs Switcher */}
+        <div className="flex bg-zinc-200/50 p-1.5 rounded-[1.5rem] max-w-md mx-auto">
           <button 
             onClick={() => setActiveTab('bills')}
             className={cn(
-              "flex-1 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all",
-              activeTab === 'bills' ? "bg-white text-black shadow-sm" : "text-gray-500 hover:text-gray-700"
+              "flex-1 py-3 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 transition-all duration-300",
+              activeTab === 'bills' ? "bg-white text-zinc-950 shadow-md scale-[1.02]" : "text-zinc-500 hover:text-zinc-800"
             )}
           >
             <Receipt className="w-4 h-4" />
-            Bills
+            Bill Ledger
           </button>
           <button 
             onClick={() => setActiveTab('iqama')}
             className={cn(
-              "flex-1 py-3 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all",
-              activeTab === 'iqama' ? "bg-white text-black shadow-sm" : "text-gray-500 hover:text-gray-700"
+              "flex-1 py-3 rounded-2xl font-bold text-sm flex items-center justify-center gap-2 transition-all duration-300",
+              activeTab === 'iqama' ? "bg-white text-zinc-950 shadow-md scale-[1.02]" : "text-zinc-500 hover:text-zinc-800"
             )}
           >
             <CreditCard className="w-4 h-4" />
-            Iqama
+            Iqama Registry
           </button>
         </div>
 
-        {/* Action Card */}
-        <section className="bg-white rounded-3xl p-8 border border-gray-100 shadow-sm text-center space-y-4">
-          <div className="mx-auto w-20 h-20 bg-gray-50 rounded-full flex items-center justify-center border-2 border-dashed border-gray-200">
-            {activeScans > 0 ? (
-              <Loader2 className="w-10 h-10 text-black animate-spin" />
-            ) : (
-              <ImageIcon className="w-10 h-10 text-gray-400" />
-            )}
-          </div>
-          
-          <div className="space-y-2">
-            <h2 className="text-2xl font-bold">Scan {activeTab === 'bills' ? 'your bill' : 'Iqama'}</h2>
-            <p className="text-gray-500 max-w-xs mx-auto">
-              {activeTab === 'bills' 
-                ? "Take a photo of your fuel, food, or tool bill to automatically extract details."
-                : "Take a photo of an Iqama to extract Name, Number, and Nationality."
-              }
-            </p>
-          </div>
-
-          <div className="flex flex-col sm:flex-row gap-3 pt-4">
-            <button 
-              onClick={() => fileInputRef.current?.click()}
-              disabled={activeScans > 0 || queue.length > 0}
-              className="flex-1 bg-black hover:bg-gray-800 text-white py-4 rounded-2xl font-bold text-lg flex items-center justify-center gap-3 transition-all active:scale-[0.98] disabled:opacity-50"
-            >
-              <Camera className="w-6 h-6" />
-              Capture
-            </button>
+        {/* Dropzone Area */}
+        <section 
+          className={cn(
+            "relative group overflow-hidden bg-white rounded-[2.5rem] p-12 border-2 border-dashed transition-all duration-500",
+            activeScans > 0 ? "border-zinc-950 bg-zinc-50" : "border-zinc-200 hover:border-zinc-400 hover:bg-zinc-50/50"
+          )}
+          onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('border-zinc-950', 'bg-zinc-50'); }}
+          onDragLeave={(e) => { e.preventDefault(); e.currentTarget.classList.remove('border-zinc-950', 'bg-zinc-50'); }}
+          onDrop={(e) => {
+            e.preventDefault();
+            e.currentTarget.classList.remove('border-zinc-950', 'bg-zinc-50');
+            const files = Array.from(e.dataTransfer.files);
+            if (files.length > 0) {
+              setQueue(prev => [...prev, ...files.map(file => ({ file, type: activeTab }))]);
+            }
+          }}
+        >
+          <div className="relative z-10 flex flex-col items-center text-center space-y-6">
+            <div className="w-24 h-24 bg-zinc-100 rounded-[2rem] flex items-center justify-center shadow-inner group-hover:scale-110 transition-transform duration-500">
+              {activeScans > 0 ? (
+                <Loader2 className="w-12 h-12 text-zinc-950 animate-spin" />
+              ) : (
+                <Plus className="w-12 h-12 text-zinc-400 group-hover:text-zinc-950 transition-colors" />
+              )}
+            </div>
             
-            <button 
-              onClick={() => galleryInputRef.current?.click()}
-              disabled={activeScans > 0 || queue.length > 0}
-              className="flex-1 bg-white border-2 border-black hover:bg-gray-50 text-black py-4 rounded-2xl font-bold text-lg flex items-center justify-center gap-3 transition-all active:scale-[0.98] disabled:opacity-50"
-            >
-              <ImageIcon className="w-6 h-6" />
-              Gallery
-            </button>
+            <div className="space-y-2">
+              <h2 className="text-3xl font-black tracking-tight text-zinc-900">
+                {activeTab === 'bills' ? 'Import Bills' : 'Import Iqamas'}
+              </h2>
+              <p className="text-zinc-500 font-medium max-w-sm mx-auto leading-relaxed">
+                Drag and drop multiple images here or use the professional capture tools below.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap justify-center gap-4 w-full max-w-lg">
+              <button 
+                onClick={() => fileInputRef.current?.click()}
+                className="flex-1 min-w-[160px] bg-zinc-950 hover:bg-zinc-800 text-white py-4 px-6 rounded-2xl font-bold text-base flex items-center justify-center gap-3 transition-all shadow-xl shadow-zinc-200 active:scale-95"
+              >
+                <Camera className="w-5 h-5" />
+                Live Capture
+              </button>
+              
+              <button 
+                onClick={() => galleryInputRef.current?.click()}
+                className="flex-1 min-w-[160px] bg-white border-2 border-zinc-950 hover:bg-zinc-50 text-zinc-950 py-4 px-6 rounded-2xl font-bold text-base flex items-center justify-center gap-3 transition-all active:scale-95"
+              >
+                <ImageIcon className="w-5 h-5" />
+                Media Library
+              </button>
+            </div>
 
             <input 
               type="file" 
@@ -424,146 +518,182 @@ export default function App() {
             />
           </div>
 
-          {queue.length > 0 && (
-            <div className="bg-blue-50 text-blue-700 p-3 rounded-xl text-sm font-bold flex items-center justify-between">
-              <span>Queue: {queue.length} left • Active: {activeScans}</span>
-              <Loader2 className="w-4 h-4 animate-spin" />
-            </div>
-          )}
-
-          {error && (
-            <div className="bg-red-50 text-red-600 p-3 rounded-xl flex items-center gap-2 text-sm font-medium">
-              <AlertCircle className="w-4 h-4" />
-              {error}
-            </div>
-          )}
+          {/* Background Decorative Elements */}
+          <div className="absolute top-0 right-0 -mr-16 -mt-16 w-64 h-64 bg-zinc-100 rounded-full blur-3xl opacity-50" />
+          <div className="absolute bottom-0 left-0 -ml-16 -mb-16 w-64 h-64 bg-zinc-100 rounded-full blur-3xl opacity-50" />
         </section>
 
-        {/* Processing Preview */}
+        {/* Batch Progress */}
         <AnimatePresence>
-          {activeScans > 0 && (
+          {(queue.length > 0 || activeScans > 0) && (
             <motion.div 
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95 }}
-              className="bg-white rounded-3xl p-4 border border-gray-100 shadow-sm flex items-center gap-4"
+              className="bg-zinc-950 text-white rounded-[2rem] p-6 shadow-2xl space-y-4"
             >
-              <div className="bg-black p-4 rounded-xl">
-                <Loader2 className="w-6 h-6 text-white animate-spin" />
-              </div>
-              <div className="flex-1">
-                <p className="font-bold">Turbo Scanning {activeScans} {activeTab === 'bills' ? 'bills' : 'iqamas'}...</p>
-                <div className="w-full bg-gray-100 h-1.5 rounded-full mt-2 overflow-hidden">
-                  <motion.div 
-                    initial={{ x: '-100%' }}
-                    animate={{ x: '100%' }}
-                    transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
-                    className="w-1/2 h-full bg-black rounded-full"
-                  />
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="bg-white/10 p-2 rounded-lg">
+                    <Loader2 className="w-5 h-5 text-emerald-400 animate-spin" />
+                  </div>
+                  <div>
+                    <p className="font-bold text-sm">Batch Processing Active</p>
+                    <p className="text-[10px] text-zinc-400 font-bold uppercase tracking-widest">
+                      {activeScans} processing • {queue.length} in queue
+                    </p>
+                  </div>
                 </div>
+                <span className="text-xs font-mono bg-white/10 px-3 py-1 rounded-full">
+                  {Math.round((activeScans / (activeScans + queue.length)) * 100) || 0}%
+                </span>
+              </div>
+              
+              <div className="w-full bg-white/10 h-2 rounded-full overflow-hidden">
+                <motion.div 
+                  className="h-full bg-emerald-500 rounded-full"
+                  initial={{ width: "0%" }}
+                  animate={{ width: `${(1 - (queue.length / (activeScans + queue.length || 1))) * 100}%` }}
+                />
               </div>
             </motion.div>
           )}
         </AnimatePresence>
 
+        {error && (
+          <motion.div 
+            initial={{ opacity: 0, x: -20 }}
+            animate={{ opacity: 1, x: 0 }}
+            className={cn(
+              "p-4 rounded-2xl flex items-center justify-between gap-3 text-sm font-bold border",
+              error.includes('Rate limit') ? "bg-amber-50 border-amber-100 text-amber-700" : "bg-red-50 border-red-100 text-red-600"
+            )}
+          >
+            <div className="flex items-center gap-3">
+              <AlertCircle className="w-5 h-5 shrink-0" />
+              {error}
+            </div>
+            {error.includes('Rate limit') && !hasApiKey && (
+              <button 
+                onClick={handleSelectKey}
+                className="bg-zinc-950 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-zinc-800 transition-all"
+              >
+                Use Paid Key
+              </button>
+            )}
+          </motion.div>
+        )}
+
         {/* List Section */}
-        <div className="space-y-4">
+        <div className="space-y-6">
           <div className="flex items-center justify-between px-2">
-            <h3 className="font-bold text-lg">
-              Scanned {activeTab === 'bills' ? 'Entries' : 'Iqamas'} ({activeTab === 'bills' ? bills.length : iqamas.length})
-            </h3>
+            <div className="flex items-center gap-3">
+              <h3 className="font-black text-2xl tracking-tight">
+                {activeTab === 'bills' ? 'Recent Ledger' : 'Identity Registry'}
+              </h3>
+              <span className="bg-zinc-200 text-zinc-600 px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-widest">
+                {activeTab === 'bills' ? bills.length : iqamas.length}
+              </span>
+            </div>
             {(activeTab === 'bills' ? bills.length > 0 : iqamas.length > 0) && (
               <button 
                 onClick={clearAll}
-                className="text-xs font-bold text-red-500 hover:text-red-600 uppercase tracking-wider"
+                className="text-[10px] font-black text-zinc-400 hover:text-red-500 uppercase tracking-[0.2em] transition-colors"
               >
-                Clear All
+                Purge All Data
               </button>
             )}
           </div>
 
-          {activeTab === 'bills' ? (
-            bills.length === 0 && activeScans === 0 ? (
-              <div className="bg-gray-50 border-2 border-dashed border-gray-200 rounded-3xl py-12 text-center">
-                <Receipt className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-                <p className="text-gray-400 font-medium">No bills scanned yet</p>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                <AnimatePresence mode="popLayout">
-                  {bills.map((bill) => (
+          <div className="grid grid-cols-1 gap-4">
+            <AnimatePresence mode="popLayout">
+              {activeTab === 'bills' ? (
+                bills.length === 0 && activeScans === 0 ? (
+                  <motion.div 
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    className="bg-white/50 border-2 border-dashed border-zinc-200 rounded-[2.5rem] py-20 text-center"
+                  >
+                    <Receipt className="w-16 h-16 text-zinc-200 mx-auto mb-4" />
+                    <p className="text-zinc-400 font-bold text-lg">Your ledger is currently empty</p>
+                  </motion.div>
+                ) : (
+                  bills.map((bill) => (
                     <motion.div
                       key={bill.id}
                       layout
-                      initial={{ opacity: 0, x: -20 }}
-                      animate={{ opacity: 1, x: 0 }}
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, scale: 0.95 }}
-                      className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm flex items-center gap-4 hover:border-gray-300 transition-colors group"
+                      className="bg-white p-6 rounded-[2rem] border border-zinc-200 shadow-sm flex items-center gap-6 hover:shadow-xl hover:shadow-zinc-200/50 transition-all duration-300 group"
                     >
-                      <div className="bg-gray-50 p-3 rounded-xl">
+                      <div className="bg-zinc-50 p-4 rounded-2xl group-hover:bg-zinc-100 transition-colors">
                         {getIcon(bill.type)}
                       </div>
                       
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold truncate">{bill.invoiceNo}</span>
-                          <span className="text-[10px] bg-gray-100 px-1.5 py-0.5 rounded font-bold text-gray-500 uppercase tracking-wider">
+                        <div className="flex items-center gap-3">
+                          <span className="font-black text-lg truncate text-zinc-900">{bill.invoiceNo}</span>
+                          <span className="text-[9px] bg-zinc-100 text-zinc-500 px-2 py-0.5 rounded-full font-black uppercase tracking-widest">
                             {bill.type}
                           </span>
                         </div>
-                        <div className="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
-                          <span>{bill.date}</span>
-                          {bill.srNo && <span>• Sr: {bill.srNo}</span>}
+                        <div className="flex items-center gap-4 text-xs font-bold text-zinc-400 mt-1">
+                          <span className="flex items-center gap-1.5"><ChevronRight className="w-3 h-3" /> {bill.date}</span>
+                          {bill.srNo && <span className="flex items-center gap-1.5"><ChevronRight className="w-3 h-3" /> SR: {bill.srNo}</span>}
                         </div>
                       </div>
 
-                      <div className="text-right">
-                        <p className="font-black text-lg">₹{bill.amount.toLocaleString()}</p>
+                      <div className="text-right space-y-1">
+                        <p className="font-black text-2xl tracking-tighter text-zinc-900">
+                          <span className="text-sm font-bold text-zinc-400 mr-1">SAR</span>
+                          {bill.amount.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                        </p>
                         <button 
                           onClick={() => deleteBill(bill.id)}
-                          className="text-gray-300 hover:text-red-500 transition-colors p-1"
+                          className="text-zinc-300 hover:text-red-500 transition-colors p-1"
                         >
-                          <Trash2 className="w-4 h-4" />
+                          <Trash2 className="w-5 h-5" />
                         </button>
                       </div>
                     </motion.div>
-                  ))}
-                </AnimatePresence>
-              </div>
-            )
-          ) : (
-            iqamas.length === 0 && activeScans === 0 ? (
-              <div className="bg-gray-50 border-2 border-dashed border-gray-200 rounded-3xl py-12 text-center">
-                <UserCircle className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-                <p className="text-gray-400 font-medium">No Iqamas scanned yet</p>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                <AnimatePresence mode="popLayout">
-                  {iqamas.map((iqama) => (
+                  ))
+                )
+              ) : (
+                iqamas.length === 0 && activeScans === 0 ? (
+                  <motion.div 
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    className="bg-white/50 border-2 border-dashed border-zinc-200 rounded-[2.5rem] py-20 text-center"
+                  >
+                    <UserCircle className="w-16 h-16 text-zinc-200 mx-auto mb-4" />
+                    <p className="text-zinc-400 font-bold text-lg">No identities registered</p>
+                  </motion.div>
+                ) : (
+                  iqamas.map((iqama) => (
                     <motion.div
                       key={iqama.id}
                       layout
-                      initial={{ opacity: 0, x: -20 }}
-                      animate={{ opacity: 1, x: 0 }}
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, scale: 0.95 }}
-                      className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm flex items-center gap-4 hover:border-gray-300 transition-colors group"
+                      className="bg-white p-6 rounded-[2rem] border border-zinc-200 shadow-sm flex items-center gap-6 hover:shadow-xl hover:shadow-zinc-200/50 transition-all duration-300 group"
                     >
-                      <div className="bg-gray-50 p-3 rounded-xl">
-                        <UserCircle className="w-5 h-5 text-blue-500" />
+                      <div className="bg-zinc-50 p-4 rounded-2xl group-hover:bg-zinc-100 transition-colors">
+                        <UserCircle className="w-6 h-6 text-zinc-950" />
                       </div>
                       
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold truncate">{iqama.name}</span>
+                        <div className="flex items-center gap-3">
+                          <span className="font-black text-lg truncate text-zinc-900 uppercase">{iqama.name}</span>
                         </div>
-                        <div className="flex items-center gap-3 text-xs text-gray-500 mt-0.5">
-                          <span className="flex items-center gap-1">
-                            <CreditCard className="w-3 h-3" />
-                            {iqama.iqamaNo}
+                        <div className="flex items-center gap-6 text-xs font-bold text-zinc-400 mt-1">
+                          <span className="flex items-center gap-2">
+                            <CreditCard className="w-4 h-4 text-zinc-300" />
+                            <span className="font-mono text-zinc-600">{iqama.iqamaNo}</span>
                           </span>
-                          <span className="flex items-center gap-1">
-                            <Globe className="w-3 h-3" />
+                          <span className="flex items-center gap-2">
+                            <Globe className="w-4 h-4 text-zinc-300" />
                             {iqama.nationality}
                           </span>
                         </div>
@@ -572,35 +702,46 @@ export default function App() {
                       <div className="text-right">
                         <button 
                           onClick={() => deleteIqama(iqama.id)}
-                          className="text-gray-300 hover:text-red-500 transition-colors p-1"
+                          className="text-zinc-300 hover:text-red-500 transition-colors p-2"
                         >
-                          <Trash2 className="w-4 h-4" />
+                          <Trash2 className="w-5 h-5" />
                         </button>
                       </div>
                     </motion.div>
-                  ))}
-                </AnimatePresence>
-              </div>
-            )
-          )}
+                  ))
+                )
+              )}
+            </AnimatePresence>
+          </div>
         </div>
       </main>
 
-      {/* Floating Stats */}
-      {activeTab === 'bills' && bills.length > 0 && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-[calc(100%-2rem)] max-w-md">
-          <div className="bg-black text-white p-4 rounded-2xl shadow-2xl flex items-center justify-between">
-            <div>
-              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Total Amount</p>
-              <p className="text-2xl font-black">₹{bills.reduce((acc, b) => acc + b.amount, 0).toLocaleString()}</p>
+      {/* Floating Action Bar */}
+      <AnimatePresence>
+        {activeTab === 'bills' && bills.length > 0 && (
+          <motion.div 
+            initial={{ y: 100, x: "-50%" }}
+            animate={{ y: 0, x: "-50%" }}
+            exit={{ y: 100, x: "-50%" }}
+            className="fixed bottom-8 left-1/2 w-[calc(100%-3rem)] max-w-xl z-40"
+          >
+            <div className="bg-zinc-950/90 backdrop-blur-2xl text-white p-6 rounded-[2.5rem] shadow-[0_32px_64px_-15px_rgba(0,0,0,0.5)] flex items-center justify-between border border-white/10">
+              <div className="space-y-0.5">
+                <p className="text-[10px] font-black text-zinc-500 uppercase tracking-[0.25em]">Consolidated Total</p>
+                <p className="text-3xl font-black tracking-tighter">
+                  <span className="text-sm font-bold text-zinc-500 mr-2">SAR</span>
+                  {bills.reduce((acc, b) => acc + b.amount, 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                </p>
+              </div>
+              <div className="h-12 w-[1px] bg-white/10 mx-6" />
+              <div className="text-right">
+                <p className="text-[10px] font-black text-zinc-500 uppercase tracking-[0.25em]">Record Count</p>
+                <p className="text-2xl font-black tracking-tighter">{bills.length}</p>
+              </div>
             </div>
-            <div className="text-right">
-              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Items</p>
-              <p className="text-xl font-bold">{bills.length}</p>
-            </div>
-          </div>
-        </div>
-      )}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
