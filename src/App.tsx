@@ -144,7 +144,15 @@ export default function App() {
 
     try {
       // Initialize Gemini right before use
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+      const apiKey = process.env.GEMINI_API_KEY || import.meta.env.VITE_GEMINI_API_KEY;
+      
+      if (!apiKey) {
+        setError("API Key is missing. Please add 'GEMINI_API_KEY' to your Secrets in AI Studio and restart the app.");
+        setActiveScans(prev => prev - 1);
+        return;
+      }
+
+      const ai = new GoogleGenAI({ apiKey });
 
       // Compress image for faster upload
       const compressedBase64 = await compressImage(file);
